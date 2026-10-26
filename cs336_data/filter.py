@@ -8,6 +8,12 @@ from resiliparse.extract.html2text import extract_plain_text
 from resiliparse.parse.encoding import detect_encoding
 
 
+LID_MODEL = fasttext.load_model("local-shared-data/classifiers/lid.176.bin")
+NSFW_MODEL = fasttext.load_model("local-shared-data/classifiers/dolma_fasttext_nsfw_jigsaw_model.bin")
+TOXIC_MODEL = fasttext.load_model("local-shared-data/classifiers/dolma_fasttext_hatespeech_jigsaw_model.bin")
+nltk.download("punkt_tab", quiet=True)
+
+
 def extract_text(html_bytes: bytes) -> str:
     encoding = detect_encoding(html_bytes)
     try: 
@@ -17,13 +23,17 @@ def extract_text(html_bytes: bytes) -> str:
 
 
 def lang_identifier(text: str) -> tuple[Any, float]:
-    model = fasttext.load_model("local-shared-data/classifiers/lid.176.bin")
     text = text.replace("\n", " ")
-    predictions = model.predict(text, k=1)
+    predictions = LID_MODEL.predict(text, k=1)
     label = predictions[0][0]
     confidence = predictions[1][0]
     label = label.replace("__label__", "")
     return (label, confidence)
+
+
+def is_english(text: str) -> bool:
+    label, confidence = lang_identifier(text)
+    return label == "en" and confidence >= 0.7
 
 
 def mask_emails(text: str) -> tuple[str, int]:
@@ -48,9 +58,8 @@ def mask_ips(text: str) -> tuple[str, int]:
 
 
 def classify_nsfw(text: str) -> tuple[Any, float]:
-    model = fasttext.load_model("local-shared-data/classifiers/dolma_fasttext_nsfw_jigsaw_model.bin")
     text = text.replace("\n", " ")
-    predictions = model.predict(text, k=1)
+    predictions = NSFW_MODEL.predict(text, k=1)
     label = predictions[0][0]
     confidence = predictions[1][0]
     label = label.replace("__label__", "")
@@ -58,9 +67,8 @@ def classify_nsfw(text: str) -> tuple[Any, float]:
 
 
 def classify_toxic_speech(text: str) -> tuple[Any, float]:
-    model = fasttext.load_model("local-shared-data/classifiers/dolma_fasttext_hatespeech_jigsaw_model.bin")
     text = text.replace("\n", " ")
-    predictions = model.predict(text, k=1)
+    predictions = TOXIC_MODEL.predict(text, k=1)
     label = predictions[0][0]
     confidence = predictions[1][0]
     label = label.replace("__label__", "")
@@ -68,7 +76,6 @@ def classify_toxic_speech(text: str) -> tuple[Any, float]:
 
 
 def gopher_quality_filter(text: str) -> bool:
-    nltk.download("punkt_tab", quiet=True)
     words = nltk.word_tokenize(text)
     
     if len(words) < 50 or len(words) > 100_000:
