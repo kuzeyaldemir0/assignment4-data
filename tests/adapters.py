@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from cs336_data.filter import classify_nsfw, classify_toxic_speech, extract_text, gopher_quality_filter, lang_identifier, mask_emails, mask_ips, mask_phones
+from cs336_data.filter import classify_nsfw, classify_quality, classify_toxic_speech, extract_text, gopher_quality_filter, lang_identifier, mask_emails, mask_ips, mask_phones
 
 
 
@@ -36,7 +36,7 @@ def run_classify_toxic_speech(text: str) -> tuple[Any, float]:
 
 
 def run_classify_quality(text: str) -> tuple[Any, float]:
-    raise NotImplementedError
+    return classify_quality(text)
 
 
 def run_gopher_quality_filter(text: str) -> bool:

@@ -1,3 +1,6 @@
+import gzip
+import random
+
 import fasttext
 import re
 
@@ -11,6 +14,7 @@ from resiliparse.parse.encoding import detect_encoding
 LID_MODEL = fasttext.load_model("local-shared-data/classifiers/lid.176.bin")
 NSFW_MODEL = fasttext.load_model("local-shared-data/classifiers/dolma_fasttext_nsfw_jigsaw_model.bin")
 TOXIC_MODEL = fasttext.load_model("local-shared-data/classifiers/dolma_fasttext_hatespeech_jigsaw_model.bin")
+QUALITY_CLASSIFIER = fasttext.load_model("local-shared-data/classifiers/quality_classifier_unpreprocessed.bin")
 nltk.download("punkt_tab", quiet=True)
 
 
@@ -75,6 +79,16 @@ def classify_toxic_speech(text: str) -> tuple[Any, float]:
     return (label, confidence)
 
 
+def is_toxic_or_nsfw(text: str, threshold: float = 0.3) -> bool:
+    nsfw_label, nsfw_conf = classify_nsfw(text)
+    tox_label, tox_conf = classify_toxic_speech(text)
+    if nsfw_label == "nsfw" and nsfw_conf >= threshold:
+        return True
+    if tox_label == "toxic" and tox_conf >= threshold:
+        return True
+    return False
+
+
 def gopher_quality_filter(text: str) -> bool:
     words = nltk.word_tokenize(text)
     
@@ -104,16 +118,19 @@ def gopher_quality_filter(text: str) -> bool:
 
     return True
 
+
+def classify_quality(text: str) -> tuple[Any, float]:
+    text = text.replace("\n", " ")
+    predictions = QUALITY_CLASSIFIER.predict(text, k=1)
+    label = predictions[0][0]
+    confidence = predictions[1][0]
+    label = label.replace("__label__", "")
+    if label == "negative":
+        label = "cc"
+    if label == "positive":
+        label = "wiki"
+    return (label, confidence)
+
+
 if __name__ == "__main__":
-    i = 0
-    with open("local-shared-data/CC/example.warc.gz", "rb") as stream:
-        for record in ArchiveIterator(stream):
-            content = record.reader.read()
-            text = extract_text(content)
-            label, confidence = lang_identifier(text)
-            if label == "en" and confidence >= 0.6:
-                if gopher_quality_filter(text) == False:
-                    print(text)
-                    print("======================================")
-                    i += 1
-                    if i == 3: break
+    ...
