@@ -1,11 +1,13 @@
-import gzip
-import random
+import os
+import hashlib
+import pathlib
 
 import fasttext
 import re
 
 from typing import Any
 from fastwarc.warc import ArchiveIterator, WarcRecordType
+from collections import defaultdict
 import nltk
 from resiliparse.extract.html2text import extract_plain_text
 from resiliparse.parse.encoding import detect_encoding
@@ -132,5 +134,30 @@ def classify_quality(text: str) -> tuple[Any, float]:
     return (label, confidence)
 
 
+def exact_deduplicate(input_files: list[os.PathLike], output_dir: os.PathLike):
+    line_freqs = defaultdict(int)
+    for file in input_files:
+        with open(file, "r") as file:
+            lines = file.read().splitlines()
+            for line in lines:
+                line_freqs[hashlib.sha256(line.encode("utf-8")).digest()] += 1
+    for file in input_files:
+        output_path = output_dir / file.name
+        with open(file, "r") as file:
+            with open(output_path, "a") as new_file:
+                lines = file.read().splitlines()
+                for line in lines:
+                    if line_freqs[hashlib.sha256(line.encode("utf-8")).digest()] <= 1:
+                            new_file.write(line + "\n")
+
+
 if __name__ == "__main__":
-    ...
+    """
+    1. Read both input files and create a defaultdict counting the occurence of each line
+    2. Read each file one by one again and if the occurence is > 1, move to the next line
+    3. else, append the current line
+    """
+    input_files = []
+    input_files.append("1.txt")
+    input_files.append("2.txt")
+    exact_deduplicate(input_files, output_dir=pathlib.Path("cs336_data/"))
