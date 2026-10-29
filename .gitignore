@@ -167,3 +167,4 @@ cython_debug/
 #.idea/
 local-shared-data/
 .DS_Store
+furu/

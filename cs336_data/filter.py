@@ -1,18 +1,26 @@
 import random
 import os
 import hashlib
+import time
 import fasttext
 import re
 import unicodedata
 import nltk
 import mmh3
 import shutil
+import concurrent.futures
+import os
+import pathlib
+import json
+import glob
 
+from tqdm import tqdm
 from pathlib import Path
 from nltk.util import ngrams
 from typing import Any
 from fastwarc.warc import ArchiveIterator, WarcRecordType
-from collections import defaultdict
+from transformers import AutoTokenizer
+from collections import Counter, defaultdict
 import numpy as np
 from itertools import combinations
 from resiliparse.extract.html2text import extract_plain_text
@@ -140,21 +148,43 @@ def classify_quality(text: str) -> tuple[Any, float]:
     return (label, confidence)
 
 
+def core_exact_dedup(docs: list[str]) -> list[str]:
+    new_docs = []
+
+    # count the frequency of each line in each document
+    line_freqs = defaultdict(int)
+    for doc in docs:
+        for line in doc.splitlines():
+            line_freqs[hashlib.sha256(line.encode("utf-8")).digest()] += 1
+
+    # if the current line in the doc is not duplicated, add it
+    # if not, continue to the next line
+    for doc in docs:
+        new_doc = ""
+        for line in doc.splitlines():
+            if line_freqs[hashlib.sha256(line.encode("utf-8")).digest()] <= 1:
+                new_doc += line + "\n"
+        new_docs.append(new_doc)
+
+    return new_docs
+
+
 def exact_deduplicate(input_files: list[os.PathLike], output_dir: os.PathLike):
+    docs = []
+
     line_freqs = defaultdict(int)
     for file in input_files:
         with open(file, "r") as file:
-            lines = file.read().splitlines()
-            for line in lines:
-                line_freqs[hashlib.sha256(line.encode("utf-8")).digest()] += 1
-    for file in input_files:
+            docs.append(file.read())
+
+    # Call the core function
+    docs = core_exact_dedup(docs)
+
+    # Write the outputs from the core function
+    for doc_idx, file in enumerate(input_files):
         output_path = output_dir / file.name
-        with open(file, "r") as file:
-            with open(output_path, "a") as new_file:
-                lines = file.read().splitlines()
-                for line in lines:
-                    if line_freqs[hashlib.sha256(line.encode("utf-8")).digest()] <= 1:
-                            new_file.write(line + "\n")
+        with open(output_path, "w") as file:
+            file.write(docs[doc_idx])
 
 
 def normalize(text: str) -> str:
@@ -195,29 +225,28 @@ def compute_minhash(ngram_set: set, num_hashes: int) -> np.array:
     return np.array(signature, dtype=np.uint32)
 
 
-def fuzzy_deduplicate(
-    input_files: list[os.PathLike],
+def core_fuzzy_dedup(
+    docs: list[str],
     num_hashes: int,
     num_bands: int,
     ngrams_count: int,
     jaccard_threshold: float,
-    output_directory: os.PathLike,
-):
+) -> set[int]:
+    
     # 1. Normalize documents, generate n-grams, and compute MinHash bands
     doc_bands = {}
     doc_ngrams = {}
 
-    for doc_id, file in enumerate(input_files):
-        with open(file, "r") as file:
-            normalized_text = normalize(file.read())
-            words = normalized_text.split()
-            ngram_set = set(ngrams(words, n=ngrams_count))
+    for doc_id, doc in enumerate(docs):
+        normalized_text = normalize(doc)
+        words = normalized_text.split()
+        ngram_set = set(ngrams(words, n=ngrams_count))
 
-            doc_ngrams[doc_id] = ngram_set
+        doc_ngrams[doc_id] = ngram_set
 
-            min_hashes = compute_minhash(ngram_set, num_hashes=num_hashes)
-            bands = np.split(min_hashes, num_bands)
-            doc_bands[doc_id] = bands
+        min_hashes = compute_minhash(ngram_set, num_hashes=num_hashes)
+        bands = np.split(min_hashes, num_bands)
+        doc_bands[doc_id] = bands
 
     # 2. Create LSH buckets containing documents with matching bands
     buckets = defaultdict(list)
@@ -251,7 +280,6 @@ def fuzzy_deduplicate(
 
     for a, b in duplicate_pairs:
         merged = {a, b}
-
         i = 0
         while i < len(clusters):
             if merged & clusters[i]:
@@ -259,11 +287,10 @@ def fuzzy_deduplicate(
                 i = 0
             else:
                 i += 1
-
         clusters.append(merged)
 
     # 6. Randomly retain one document from each duplicate cluster
-    kept_ids = set(range(len(input_files)))
+    kept_ids = set(range(len(docs)))
 
     for cluster in clusters:
         selected = random.choice(list(cluster))
@@ -272,7 +299,25 @@ def fuzzy_deduplicate(
             if doc_id != selected:
                 kept_ids.remove(doc_id)
 
-    # 7. Write retained documents to the output directory
+    return kept_ids
+
+
+def fuzzy_deduplicate(
+    input_files: list[os.PathLike],
+    num_hashes: int,
+    num_bands: int,
+    ngrams_count: int,
+    jaccard_threshold: float,
+    output_directory: os.PathLike,
+):
+    docs = []
+    for file in input_files:
+        with open(file, "r") as file:
+            docs.append(file.read())
+
+    # Call the core module to perform fuzzy dedup with MinHash + LSH on the docs
+    kept_ids = core_fuzzy_dedup(docs, num_hashes, num_bands, ngrams_count, jaccard_threshold)
+
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -281,17 +326,75 @@ def fuzzy_deduplicate(
         shutil.copyfile(source, output_directory / source.name)
 
 
+def process_single_wet_file(input_path: str, output_path: str):
+
+    counts = Counter()
+    with open(input_path, "rb") as stream, open(output_path, "w") as out:
+        for record in ArchiveIterator(stream, record_types=WarcRecordType.conversion):
+            url = record.headers["WARC-Target-URI"]
+            text = record.reader.read().decode("utf-8", errors="replace")
+            counts["total"] += 1
+ 
+            # Toxicity and NSFW filters
+            if is_toxic_or_nsfw(text):
+                counts["toxic_nsfw"] += 1
+                continue
+
+            # Mask emails, phones, and IPs
+            text = mask_emails(mask_phones(mask_ips(text)[0])[0])[0]
+
+            # Gopher quality filter
+            if not gopher_quality_filter(text):
+                counts["not_gopher"] += 1
+                continue
+
+            # Our quality classifier
+            label, confidence = classify_quality(text)
+            if label == "cc" and confidence > 0.5:
+                counts["not_quality"] += 1
+                continue
+
+            training_example = {
+                "url": url,
+                "text": text,
+            }
+            out.write(json.dumps(training_example) + "\n")
+            counts["kept"] += 1
+    
+    return output_path, counts
+    
+
 if __name__ == "__main__":
-    input_files = [
-        "tests/fixtures/documents_with_fuzzy_duplicates/pytorch_license.txt",
-        "tests/fixtures/documents_with_fuzzy_duplicates/rails_mit_license.txt",
-        "tests/fixtures/documents_with_fuzzy_duplicates/react_mit_license.txt",
-    ]
-    fuzzy_deduplicate(
-        input_files,
-        num_hashes=10,
-        num_bands=5,
-        ngrams_count=2,
-        jaccard_threshold=0.5,
-        output_directory=Path("local-shared-data/")
-    )
+    start_time = time.perf_counter()
+    
+    # Set up the executor
+    # I observed 4 workers has the best perf ratio  for my device on my tests
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=4)
+    wet_filepaths = sorted(glob.glob("local-shared-data/english-wet-data/*.gz"))
+    output_directory_path = "data/"
+    
+    total = Counter()
+    futures = []
+    for wet_filepath in wet_filepaths:
+        # For each warc.wet.gz filepath, submit a job to the executor and get a future back
+        wet_filename = str(pathlib.Path(wet_filepath).name).replace(".warc.wet.gz", ".jsonl")
+        future = executor.submit(
+            process_single_wet_file,
+            wet_filepath,
+            os.path.join(output_directory_path, wet_filename),
+        )
+        # Store the futures
+        futures.append(future)
+    
+    # Iterate over the completed futures as they finish, using a progress bar
+    # to keep track of progress.
+    for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(wet_filepaths),
+    ):
+        output_file, counts = future.result()
+        total += counts
+        print(f"Output file written: {output_file}")
+        
+    print(f"Elapsed time: {time.perf_counter() - start_time:.2f}")
+    print(total.items())
