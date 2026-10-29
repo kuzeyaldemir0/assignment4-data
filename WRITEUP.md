@@ -35,3 +35,9 @@
 ## Problem (gopher_quality_filters):  Gopher quality filters
 
 (b) I don't disagree with the predictions where the text was quality based on the Gopher quality filter since not most of them passed but we need a way to still separate some parts of the quality text that passed it since it still has some artifacts from the web page in general even though the document has passed the test since we either pass the whole document or not. An ecommerce store that had somewhat useful information about their product may have been perhaps a little helpful, though I still agree with the whole text not passing the text.
+
+## Problem (filter_data):  Filter data for language modeling
+
+(a) In total we had 637,937 documents with 100 wet files I've downloaded (n_files = 100). ~2k (~0.3%) of them were toxic/nsfw, then ~169k of the remaining documents (~26%) did not pass the gopher quality filter, lastly ~224k of the remaining did not pass our quality filter. We kept ~242k of the ~637k documents which is ~38%.
+
+(b) We used 100 raw files in our test and the script ran around 12 minutes. So, handout's 2500 files would take around 300 minutes and the full crawl which is around 100k wet files would take around 12000 minutes or 200 hours.
