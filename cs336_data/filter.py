@@ -1,14 +1,20 @@
+import random
 import os
 import hashlib
-import pathlib
-
 import fasttext
 import re
+import unicodedata
+import nltk
+import mmh3
+import shutil
 
+from pathlib import Path
+from nltk.util import ngrams
 from typing import Any
 from fastwarc.warc import ArchiveIterator, WarcRecordType
 from collections import defaultdict
-import nltk
+import numpy as np
+from itertools import combinations
 from resiliparse.extract.html2text import extract_plain_text
 from resiliparse.parse.encoding import detect_encoding
 
@@ -151,13 +157,141 @@ def exact_deduplicate(input_files: list[os.PathLike], output_dir: os.PathLike):
                             new_file.write(line + "\n")
 
 
+def normalize(text: str) -> str:
+    # 1. Lowercase
+    text = text.lower()
+
+    # 2. NFD Unicode normalization
+    text = unicodedata.normalize("NFD", text)
+
+    # 3. Remove accents (combining marks)
+    text = "".join(
+        char for char in text
+        if unicodedata.category(char) != "Mn"
+    )
+
+    # 4. Remove punctuation
+    text = "".join(
+        char for char in text
+        if not unicodedata.category(char).startswith("P")
+    )
+
+    # 5. Normalize whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def compute_minhash(ngram_set: set, num_hashes: int) -> np.array:
+    signature = []
+
+    for seed in range(num_hashes):
+        hash_values = [
+            mmh3.hash(" ".join(gram), seed=seed, signed=False)
+            for gram in ngram_set
+        ]
+        signature.append(min(hash_values))
+
+    return np.array(signature, dtype=np.uint32)
+
+
+def fuzzy_deduplicate(
+    input_files: list[os.PathLike],
+    num_hashes: int,
+    num_bands: int,
+    ngrams_count: int,
+    jaccard_threshold: float,
+    output_directory: os.PathLike,
+):
+    # 1. Normalize documents, generate n-grams, and compute MinHash bands
+    doc_bands = {}
+    doc_ngrams = {}
+
+    for doc_id, file in enumerate(input_files):
+        with open(file, "r") as file:
+            normalized_text = normalize(file.read())
+            words = normalized_text.split()
+            ngram_set = set(ngrams(words, n=ngrams_count))
+
+            doc_ngrams[doc_id] = ngram_set
+
+            min_hashes = compute_minhash(ngram_set, num_hashes=num_hashes)
+            bands = np.split(min_hashes, num_bands)
+            doc_bands[doc_id] = bands
+
+    # 2. Create LSH buckets containing documents with matching bands
+    buckets = defaultdict(list)
+
+    for doc_id, bands in doc_bands.items():
+        for band_idx, band in enumerate(bands):
+            key = (band_idx, tuple(band))
+            buckets[key].append(doc_id)
+
+    # 3. Generate candidate pairs from documents sharing LSH buckets
+    candidate_pairs = set()
+
+    for doc_ids in buckets.values():
+        candidate_pairs.update(combinations(sorted(doc_ids), 2))
+
+    # 4. Verify candidate pairs using exact Jaccard similarity
+    duplicate_pairs = []
+
+    for doc_a, doc_b in candidate_pairs:
+        a_ngram = doc_ngrams[doc_a]
+        b_ngram = doc_ngrams[doc_b]
+
+        union = a_ngram | b_ngram
+        similarity = len(a_ngram & b_ngram) / len(union) if union else 0.0
+
+        if similarity >= jaccard_threshold:
+            duplicate_pairs.append((doc_a, doc_b))
+
+    # 5. Group connected duplicate pairs into clusters
+    clusters = []
+
+    for a, b in duplicate_pairs:
+        merged = {a, b}
+
+        i = 0
+        while i < len(clusters):
+            if merged & clusters[i]:
+                merged.update(clusters.pop(i))
+                i = 0
+            else:
+                i += 1
+
+        clusters.append(merged)
+
+    # 6. Randomly retain one document from each duplicate cluster
+    kept_ids = set(range(len(input_files)))
+
+    for cluster in clusters:
+        selected = random.choice(list(cluster))
+
+        for doc_id in cluster:
+            if doc_id != selected:
+                kept_ids.remove(doc_id)
+
+    # 7. Write retained documents to the output directory
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    for doc_id in kept_ids:
+        source = Path(input_files[doc_id])
+        shutil.copyfile(source, output_directory / source.name)
+
+
 if __name__ == "__main__":
-    """
-    1. Read both input files and create a defaultdict counting the occurence of each line
-    2. Read each file one by one again and if the occurence is > 1, move to the next line
-    3. else, append the current line
-    """
-    input_files = []
-    input_files.append("1.txt")
-    input_files.append("2.txt")
-    exact_deduplicate(input_files, output_dir=pathlib.Path("cs336_data/"))
+    input_files = [
+        "tests/fixtures/documents_with_fuzzy_duplicates/pytorch_license.txt",
+        "tests/fixtures/documents_with_fuzzy_duplicates/rails_mit_license.txt",
+        "tests/fixtures/documents_with_fuzzy_duplicates/react_mit_license.txt",
+    ]
+    fuzzy_deduplicate(
+        input_files,
+        num_hashes=10,
+        num_bands=5,
+        ngrams_count=2,
+        jaccard_threshold=0.5,
+        output_directory=Path("local-shared-data/")
+    )

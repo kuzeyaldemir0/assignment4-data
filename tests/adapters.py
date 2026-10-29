@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from cs336_data.filter import classify_nsfw, classify_quality, classify_toxic_speech, exact_deduplicate, extract_text, gopher_quality_filter, lang_identifier, mask_emails, mask_ips, mask_phones
+from cs336_data.filter import classify_nsfw, classify_quality, classify_toxic_speech, exact_deduplicate, extract_text, fuzzy_deduplicate, gopher_quality_filter, lang_identifier, mask_emails, mask_ips, mask_phones
 
 
 
@@ -57,4 +57,11 @@ def run_minhash_deduplication(
     jaccard_threshold: float,
     output_directory: os.PathLike,
 ):
-    raise NotImplementedError
+    fuzzy_deduplicate(
+        input_files,
+        num_hashes,
+        num_bands,
+        ngrams,
+        jaccard_threshold,
+        output_directory
+    )
